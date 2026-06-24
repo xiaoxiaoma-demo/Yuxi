@@ -25,7 +25,6 @@ class Config(BaseModel):
     """
 
     save_dir: str = Field(default="saves", description="保存目录", exclude=True)
-    enable_reranker: bool = Field(default=True, description="是否开启重排序")
     enable_content_guard: bool = Field(default=False, description="是否启用内容审查")
     enable_content_guard_llm: bool = Field(default=False, description="是否启用LLM内容审查")
     default_model: str = Field(
@@ -37,18 +36,17 @@ class Config(BaseModel):
         description="快速响应模型",
     )
     embed_model: str = Field(
-        default="yuxi-embedding:bge-m3",
+        default="siliconflow-cn:Pro/BAAI/bge-m3",
         description="默认 Embedding 模型",
     )
     reranker: str = Field(
-        default="yuxi-reranker:bge-reranker-v2-m3",
+        default="siliconflow-cn:Pro/BAAI/bge-reranker-v2-m3",
         description="默认 Re-Ranker 模型",
     )
     content_guard_llm_model: str = Field(
         default="siliconflow-cn:Pro/MiniMaxAI/MiniMax-M2.5",
         description="内容审查LLM模型",
     )
-    default_agent_id: str = Field(default="ChatbotAgent", description="默认智能体ID")
 
     sandbox_provider: str = Field(default="provisioner", description="沙箱提供者")
     sandbox_provisioner_url: str = Field(default="http://sandbox-provisioner:8002", description="沙箱服务地址")
