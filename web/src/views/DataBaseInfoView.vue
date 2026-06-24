@@ -1,6 +1,11 @@
 <template>
   <div class="database-info-container extension-detail-page">
-    <FileDetailModal />
+    <FileDetailModal
+      v-model:open="store.state.fileDetailModalVisible"
+      :kb-id="kbId"
+      :file-id="store.fileDetailFileId"
+      @closed="store.closeFileDetail"
+    />
 
     <FileUploadModal
       v-model:visible="addFilesModalVisible"
@@ -90,9 +95,11 @@
               </div>
             </div>
             <div class="file-panel-status">
-              <div
+              <button
                 v-if="pendingParseCount > 0"
+                type="button"
                 class="file-stat-card file-stat-action file-stat-summary"
+                :disabled="store.state.chunkLoading"
                 @click="confirmBatchParse"
               >
                 <FileText :size="16" />
@@ -100,10 +107,12 @@
                   <strong>{{ pendingParseCount }}</strong>
                   <span>待解析</span>
                 </div>
-              </div>
-              <div
+              </button>
+              <button
                 v-if="pendingIndexCount > 0"
+                type="button"
                 class="file-stat-card file-stat-action file-stat-summary"
+                :disabled="store.state.chunkLoading"
                 @click="confirmBatchIndex"
               >
                 <DatabaseIcon :size="16" />
@@ -111,7 +120,7 @@
                   <strong>{{ pendingIndexCount }}</strong>
                   <span>待入库</span>
                 </div>
-              </div>
+              </button>
               <div class="file-stat-card file-stat-summary">
                 <FileText :size="16" />
                 <div class="file-stat-inline">
@@ -252,6 +261,7 @@
             :name="editForm.name"
             :files="fileList"
             placeholder="请输入知识库描述"
+            action-placement="header"
             :rows="4"
           />
         </a-form-item>
@@ -454,8 +464,7 @@ watch(visibleTabs, (nextTabs) => {
 })
 
 const pendingParseCount = computed(() => {
-  const files = store.database.files || {}
-  return Object.values(files).filter((f) => !f.is_folder && f.status === 'uploaded').length
+  return Number(store.database.stats?.pending_parse_count || 0)
 })
 
 const formatStatNumber = (value) => {
@@ -466,23 +475,21 @@ const formatStatNumber = (value) => {
 const formatTokenStatNumber = (value) => {
   const number = Number(value ?? 0)
   if (!Number.isFinite(number)) return '0'
-  if (number > 10000) return `${Math.round(number / 1000)}K`
+  const absNumber = Math.abs(number)
+  if (absNumber > 1024 * 1000) return `${(number / 1_000_000).toFixed(1)} m`
+  if (absNumber >= 1000) return `${Math.round(number / 1000).toLocaleString('zh-CN')} k`
   return number.toLocaleString('zh-CN')
 }
 
 const statsRepairing = ref(false)
 
 const fileStats = computed(() => {
-  const files = Object.values(store.database.files || {}).filter((file) => !file.is_folder)
   const stats = store.database.stats || {}
   const statsFileCount = Number(stats.file_count)
-  const totalSize = files.reduce((sum, file) => {
-    const size = Number(file.file_size ?? file.size ?? 0)
-    return Number.isFinite(size) ? sum + size : sum
-  }, 0)
+  const totalSize = Number(stats.total_size || 0)
 
   return {
-    count: Number.isFinite(statsFileCount) ? statsFileCount : files.length,
+    count: Number.isFinite(statsFileCount) ? statsFileCount : 0,
     sizeText: totalSize > 0 ? formatFileSize(totalSize) : '',
     chunkText: formatStatNumber(stats.chunk_count),
     tokenText: formatTokenStatNumber(stats.token_count)
@@ -515,42 +522,36 @@ const repairDatabaseStats = async () => {
 }
 
 const pendingIndexCount = computed(() => {
-  const files = store.database.files || {}
-  return Object.values(files).filter((f) => {
-    if (f.is_folder) return false
-    return f.status === 'parsed' || f.status === 'error_indexing'
-  }).length
+  return Number(store.database.stats?.pending_index_count || 0)
 })
 
 const confirmBatchParse = () => {
-  const fileIds = Object.values(store.database.files || {})
-    .filter((f) => f.status === 'uploaded')
-    .map((f) => f.file_id)
-
-  if (fileIds.length === 0) return
+  const count = pendingParseCount.value
+  if (count <= 0) {
+    message.info('没有待解析文档')
+    return
+  }
 
   Modal.confirm({
-    title: '批量解析',
-    content: `确定要解析 ${fileIds.length} 个文件吗？`,
-    onOk: () => store.parseFiles(fileIds)
+    title: '解析待解析文件',
+    content: `将提交 ${formatStatNumber(count)} 个待解析文件，任务会在后台按批处理，可在任务中心查看进度。`,
+    okText: '提交解析',
+    cancelText: '取消',
+    onOk: () => store.parsePendingFiles(count)
   })
 }
 
 const confirmBatchIndex = () => {
-  const fileIds = Object.values(store.database.files || {})
-    .filter((f) => {
-      if (f.is_folder) return false
-      return f.status === 'parsed' || f.status === 'error_indexing'
-    })
-    .map((f) => f.file_id)
+  const count = pendingIndexCount.value
+  if (count <= 0) {
+    message.info('没有待入库文档')
+    return
+  }
 
-  if (fileIds.length === 0) return
-
-  Modal.confirm({
-    title: '批量入库',
-    content: `确定要入库 ${fileIds.length} 个文件吗？`,
-    onOk: () => store.indexFiles(fileIds)
-  })
+  const opened = fileTableRef.value?.startPendingIndex?.(count)
+  if (!opened) {
+    message.error('文件列表尚未加载完成，请稍后再试')
+  }
 }
 
 const mindmapSectionRef = ref(null)
@@ -584,7 +585,8 @@ const showAddFilesModal = (options = {}) => {
   isFolderUploadMode.value = isFolder
   addFilesMode.value = mode
   addFilesModalVisible.value = true
-  currentFolderId.value = null
+  currentFolderId.value =
+    fileTableRef.value?.getCurrentFolderId?.() || store.fileBrowser.parentId || null
 }
 
 const showCreateFolderModal = () => {
@@ -592,28 +594,20 @@ const showCreateFolderModal = () => {
 }
 
 const folderTree = computed(() => {
-  const files = store.database.files || {}
-  const fileList = Object.values(files)
-  const nodeMap = new Map()
   const roots = []
-
-  fileList.forEach((file) => {
-    if (file.is_folder) {
-      const item = { ...file, title: file.filename, value: file.file_id, children: [] }
-      nodeMap.set(file.file_id, item)
+  let currentLevel = roots
+  for (const item of (store.folderBreadcrumbs || [])
+    .slice(1)
+    .filter((node) => !node.is_virtual_folder)) {
+    const node = {
+      file_id: item.file_id,
+      filename: item.filename,
+      is_folder: true,
+      children: []
     }
-  })
-
-  fileList.forEach((file) => {
-    if (file.is_folder && file.parent_id && nodeMap.has(file.parent_id)) {
-      const parent = nodeMap.get(file.parent_id)
-      const child = nodeMap.get(file.file_id)
-      if (parent && child) parent.children.push(child)
-    } else if (file.is_folder && !file.parent_id && nodeMap.has(file.file_id)) {
-      roots.push(nodeMap.get(file.file_id))
-    }
-  })
-
+    currentLevel.push(node)
+    currentLevel = node.children
+  }
   return roots
 })
 
@@ -623,8 +617,8 @@ const onFileUploadSuccess = () => {
 
 const resetFileSelectionState = () => {
   store.selectedRowKeys = []
-  store.selectedFile = null
-  store.state.fileDetailModalVisible = false
+  store.closeFileDetail()
+  store.resetFileBrowser()
 }
 
 watch(
@@ -643,11 +637,9 @@ watch(
 const previousFileCount = ref(0)
 
 watch(
-  () => database.value?.files,
-  (newFiles) => {
-    if (!newFiles) return
-
-    const newFileCount = Object.keys(newFiles).length
+  () => database.value?.stats?.file_count,
+  (newFileCountValue) => {
+    const newFileCount = Number(newFileCountValue || 0)
     const oldFileCount = previousFileCount.value
 
     if (isInitialLoad.value) {
@@ -683,7 +675,7 @@ watch(
 
     previousFileCount.value = newFileCount
   },
-  { deep: true }
+  { deep: false }
 )
 
 const backToDatabase = () => {
@@ -735,10 +727,7 @@ const rules = {
 const chunkPresetOptions = CHUNK_PRESET_OPTIONS.map(({ label, value }) => ({ label, value }))
 const editPresetDescription = computed(() => getChunkPresetDescription(editForm.chunk_preset_id))
 const fileList = computed(() => {
-  if (!database.value?.files) return []
-  return Object.values(database.value.files)
-    .map((f) => f.filename)
-    .filter(Boolean)
+  return (store.documentFiles || []).map((f) => f.filename).filter(Boolean)
 })
 
 const canEditShareConfig = computed(() => userStore.isSuperAdmin || userStore.isAdmin)
@@ -1184,6 +1173,11 @@ onMounted(() => {
 
   &:hover {
     border-color: var(--color-warning-700);
+  }
+
+  &:disabled {
+    cursor: not-allowed;
+    opacity: 0.6;
   }
 }
 
